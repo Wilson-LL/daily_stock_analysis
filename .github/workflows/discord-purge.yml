@@ -1,0 +1,79 @@
+name: Purge Discord Stock Channel
+
+on:
+  schedule:
+    - cron: "0 11 * * *"  # 台灣時間每天 19:00
+  workflow_dispatch:
+
+jobs:
+  purge:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Purge Discord channel
+        env:
+          DISCORD_BOT_TOKEN: ${{ secrets.DISCORD_BOT_TOKEN }}
+          DISCORD_CHANNEL_ID: ${{ secrets.DISCORD_CHANNEL_ID }}
+        run: |
+          python - <<'PY'
+          import os
+          import time
+          import requests
+
+          token = os.environ["DISCORD_BOT_TOKEN"]
+          channel_id = os.environ["DISCORD_CHANNEL_ID"]
+
+          headers = {
+              "Authorization": f"Bot {token}",
+              "Content-Type": "application/json",
+          }
+
+          base = f"https://discord.com/api/v10/channels/{channel_id}/messages"
+
+          total = 0
+
+          while True:
+              r = requests.get(base, headers=headers, params={"limit": 100})
+              if r.status_code == 429:
+                  retry_after = r.json().get("retry_after", 1)
+                  time.sleep(float(retry_after))
+                  continue
+              r.raise_for_status()
+
+              messages = r.json()
+              if not messages:
+                  break
+
+              ids = [m["id"] for m in messages]
+
+              if len(ids) == 1:
+                  dr = requests.delete(f"{base}/{ids[0]}", headers=headers)
+                  if dr.status_code == 429:
+                      retry_after = dr.json().get("retry_after", 1)
+                      time.sleep(float(retry_after))
+                      continue
+                  if dr.status_code not in (204, 404):
+                      print(dr.status_code, dr.text)
+                      dr.raise_for_status()
+                  total += 1
+              else:
+                  br = requests.post(
+                      f"{base}/bulk-delete",
+                      headers=headers,
+                      json={"messages": ids},
+                  )
+                  if br.status_code == 429:
+                      retry_after = br.json().get("retry_after", 1)
+                      time.sleep(float(retry_after))
+                      continue
+                  if br.status_code not in (204, 404):
+                      print(br.status_code, br.text)
+                      br.raise_for_status()
+                  total += len(ids)
+
+              print(f"Deleted so far: {total}")
+              time.sleep(1)
+
+          print(f"Done. Total deleted: {total}")
+          PY
