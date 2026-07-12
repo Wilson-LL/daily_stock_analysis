@@ -2,7 +2,7 @@ name: Purge Discord Stock Channel
 
 on:
   schedule:
-    - cron: "0 11 * * *"  # 台灣時間每天 19:00
+    - cron: "7 11 * * 0,2,4"  # 台灣時間每天 19:00
   workflow_dispatch:
 
 jobs:
