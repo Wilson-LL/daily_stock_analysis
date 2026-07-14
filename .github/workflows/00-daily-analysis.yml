@@ -1,24 +1,33 @@
 name: 每日股票分析
 
 on:
-  # 定时触发 - 每天北京时间 18:00 (UTC 10:00)
+  # 定時觸發
   schedule:
-    - cron: '7 12 * * 0,2,4'     # 週一到週五，UTC 12:00 = 台灣時間 20:00
-  
-  # 手动触发
+    - cron: '7 12 * * 2,4'  # 台灣時間週二、週四 20:07：核心清單
+    - cron: '7 12 * * 0'    # 台灣時間週日 20:07：核心清單 + 週掃清單
+
+  # 手動觸發
   workflow_dispatch:
     inputs:
       mode:
-        description: '运行模式'
+        description: '運行模式'
         required: true
-        default: 'full'
+        default: 'stocks-only'
         type: choice
         options:
-          - full          # 完整分析（股票+大盘）
-          - market-only   # 仅大盘复盘
-          - stocks-only   # 仅股票分析
+          - full          # 完整分析（股票+大盤）
+          - market-only   # 僅大盤復盤
+          - stocks-only   # 僅股票分析
+      list_type:
+        description: '股票清單類型'
+        required: true
+        default: 'core'
+        type: choice
+        options:
+          - core           # 核心清單
+          - weekly         # 核心清單 + 週掃清單
       force_run:
-        description: '强制运行（跳过交易日检查）'
+        description: '強制運行（跳過交易日檢查）'
         required: false
         default: false
         type: boolean
@@ -380,6 +389,8 @@ jobs:
           # ==========================================
           # 避免直接写入 STOCK_LIST，保留同名 Environment variables 的 runner 环境值。
           STOCK_LIST_CONFIG: ${{ vars.STOCK_LIST || secrets.STOCK_LIST }}
+          STOCK_LIST_CORE_CONFIG: ${{ vars.STOCK_LIST_CORE || secrets.STOCK_LIST_CORE }}
+          STOCK_LIST_WEEKLY_EXTRA_CONFIG: ${{ vars.STOCK_LIST_WEEKLY_EXTRA || secrets.STOCK_LIST_WEEKLY_EXTRA }}
           MARKET_REVIEW_REGION: ${{ vars.MARKET_REVIEW_REGION || secrets.MARKET_REVIEW_REGION || 'cn' }}
           MARKET_REVIEW_COLOR_SCHEME: ${{ vars.MARKET_REVIEW_COLOR_SCHEME || secrets.MARKET_REVIEW_COLOR_SCHEME || 'green_up' }}
           
@@ -407,14 +418,43 @@ jobs:
           REALTIME_SOURCE_PRIORITY: ${{ vars.REALTIME_SOURCE_PRIORITY || 'tencent,akshare_sina,efinance,akshare_em' }}
           
         run: |
-          # 解析自选股配置：
-          # 1. Repository/Environment secrets 或 Repository variables（STOCK_LIST_CONFIG）
-          # 2. 同名 Environment variables 注入的 runner 环境变量（STOCK_LIST）
-          # 3. 最小默认值
-          if [ -n "${STOCK_LIST_CONFIG:-}" ]; then
-            export STOCK_LIST="$STOCK_LIST_CONFIG"
-          elif [ -z "${STOCK_LIST:-}" ]; then
-            export STOCK_LIST="600519"
+          # 解析股票清單：
+          # 週二、週四：核心清單 STOCK_LIST_CORE
+          # 週日：核心清單 STOCK_LIST_CORE + 週掃清單 STOCK_LIST_WEEKLY_EXTRA
+          EVENT_NAME="${{ github.event_name }}"
+          SCHEDULE="${{ github.event.schedule }}"
+          LIST_TYPE="${{ github.event.inputs.list_type || '' }}"
+
+          if [ "$EVENT_NAME" = "schedule" ]; then
+            if [ "$SCHEDULE" = "7 12 * * 0" ]; then
+              LIST_TYPE="weekly"
+            else
+              LIST_TYPE="core"
+            fi
+          elif [ -z "$LIST_TYPE" ]; then
+            LIST_TYPE="core"
+          fi
+
+          echo "📌 股票清單類型: $LIST_TYPE"
+
+          if [ "$LIST_TYPE" = "weekly" ]; then
+            if [ -n "${STOCK_LIST_CORE_CONFIG:-}" ] && [ -n "${STOCK_LIST_WEEKLY_EXTRA_CONFIG:-}" ]; then
+              export STOCK_LIST="${STOCK_LIST_CORE_CONFIG},${STOCK_LIST_WEEKLY_EXTRA_CONFIG}"
+            elif [ -n "${STOCK_LIST_CORE_CONFIG:-}" ]; then
+              export STOCK_LIST="$STOCK_LIST_CORE_CONFIG"
+            elif [ -n "${STOCK_LIST_CONFIG:-}" ]; then
+              export STOCK_LIST="$STOCK_LIST_CONFIG"
+            elif [ -z "${STOCK_LIST:-}" ]; then
+              export STOCK_LIST="600519"
+            fi
+          else
+            if [ -n "${STOCK_LIST_CORE_CONFIG:-}" ]; then
+              export STOCK_LIST="$STOCK_LIST_CORE_CONFIG"
+            elif [ -n "${STOCK_LIST_CONFIG:-}" ]; then
+              export STOCK_LIST="$STOCK_LIST_CONFIG"
+            elif [ -z "${STOCK_LIST:-}" ]; then
+              export STOCK_LIST="600519"
+            fi
           fi
 
           # 处理 LITELLM YAML 配置文件
@@ -428,7 +468,7 @@ jobs:
           fi
 
           # 判断运行模式
-          MODE="${{ github.event.inputs.mode || 'full' }}"
+          MODE="${{ github.event.inputs.mode || 'stocks-only' }}"
           
           echo "=========================================="
           echo "🚀 A股自选股智能分析系统"
@@ -502,7 +542,10 @@ jobs:
           FORCE_RUN_ARG=""
           if [ "${{ github.event.inputs.force_run }}" = "true" ]; then
             FORCE_RUN_ARG="--force-run"
-            echo "⚡ 已启用强制运行模式（跳过交易日检查）"
+            echo "⚡ 已啟用強制運行模式（跳過交易日檢查）"
+          elif [ "$EVENT_NAME" = "schedule" ] && [ "$LIST_TYPE" = "weekly" ]; then
+            FORCE_RUN_ARG="--force-run"
+            echo "⚡ 週日週掃模式：自動跳過交易日檢查"
           fi
 
           # 执行分析
@@ -514,6 +557,75 @@ jobs:
             python main.py $FORCE_RUN_ARG
           fi
       
+      
+      - name: 通知 Discord 分析完成並標記我
+        if: success()
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          DISCORD_MENTION_USER_ID: ${{ vars.DISCORD_MENTION_USER_ID || secrets.DISCORD_MENTION_USER_ID }}
+        run: |
+          python - <<'PY'
+          import os
+          import requests
+
+          webhook_url = os.environ.get("DISCORD_WEBHOOK_URL", "").strip()
+          user_id = os.environ.get("DISCORD_MENTION_USER_ID", "").strip()
+
+          if not webhook_url:
+              print("DISCORD_WEBHOOK_URL is empty, skip mention.")
+              raise SystemExit(0)
+
+          if user_id:
+              payload = {
+                  "content": f"<@{user_id}> 股票分析已完成，請查看上方報告。",
+                  "allowed_mentions": {"users": [user_id]},
+              }
+          else:
+              payload = {"content": "股票分析已完成，請查看上方報告。"}
+
+          r = requests.post(webhook_url, json=payload, timeout=20)
+          if r.status_code not in (200, 204):
+              print(r.status_code, r.text)
+              r.raise_for_status()
+
+          print("Discord success mention sent.")
+          PY
+
+      - name: 通知 Discord 分析失敗並標記我
+        if: failure()
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          DISCORD_MENTION_USER_ID: ${{ vars.DISCORD_MENTION_USER_ID || secrets.DISCORD_MENTION_USER_ID }}
+          GITHUB_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          python - <<'PY'
+          import os
+          import requests
+
+          webhook_url = os.environ.get("DISCORD_WEBHOOK_URL", "").strip()
+          user_id = os.environ.get("DISCORD_MENTION_USER_ID", "").strip()
+          run_url = os.environ.get("GITHUB_RUN_URL", "").strip()
+
+          if not webhook_url:
+              print("DISCORD_WEBHOOK_URL is empty, skip failure mention.")
+              raise SystemExit(0)
+
+          if user_id:
+              payload = {
+                  "content": f"<@{user_id}> 股票分析失敗，請檢查 GitHub Actions：\n{run_url}",
+                  "allowed_mentions": {"users": [user_id]},
+              }
+          else:
+              payload = {"content": f"股票分析失敗，請檢查 GitHub Actions：\n{run_url}"}
+
+          r = requests.post(webhook_url, json=payload, timeout=20)
+          if r.status_code not in (200, 204):
+              print(r.status_code, r.text)
+              r.raise_for_status()
+
+          print("Discord failure mention sent.")
+          PY
+
       - name: 上传分析报告
         uses: actions/upload-artifact@v6
         if: always()
